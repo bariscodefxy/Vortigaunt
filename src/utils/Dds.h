@@ -86,6 +86,29 @@ void decodeDXT5(const uint8_t* src, uint32_t* output, int width, int height);
 bool isDdsFile(const std::string& filePath);
 std::vector<uint32_t> decodeDdsToPixels(const std::vector<uint8_t>& data, uint32_t& width, uint32_t& height);
 
+// ============================================================================
+// Encoder
+// ============================================================================
+//
+// CSO sprites (SPR version 3) carry one complete DDS file per frame, and they
+// are remarkably uniform: of the 1199 such sprites shipped with the game, every
+// one of their 30195 frames is DXT5 with no mipmaps. So that is the one thing
+// written here, with a header field for field identical to theirs.
+
+// One 4x4 block of RGBA8 pixels (16 pixels, 4 bytes each, row major) into the
+// 16 bytes DXT5 stores it as: an interpolated alpha block then a colour block.
+void encodeDxt5Block(const uint8_t* rgbaBlock, uint8_t out[16]);
+
+// rgba: width * height * 4 bytes, row major, 8 bits per channel, not
+// premultiplied. Width and height must both be multiples of 4 - DXT5 works in
+// 4x4 blocks and there is nothing sensible to do with a partial one. Returns an
+// empty vector if they are not.
+std::vector<uint8_t> encodeDxt5Dds(const uint8_t* rgba, int width, int height);
+
+// The size encodeDxt5Dds will produce: the 128 byte header plus one 16 byte
+// block per 4x4 pixels.
+size_t dxt5DdsSize(int width, int height);
+
 #ifdef QT_WIDGETS_LIB
 QImage loadDdsFromMemory(const std::vector<uint8_t>& ddsData);
 QImage loadDdsToQImage(const QString& filePath);

@@ -278,6 +278,7 @@ private:
     QPushButton* m_browseFramesButton;
     QPushButton* m_createSpriteButton;
     QComboBox* m_spriteTypeCombo;
+    QComboBox* m_spriteVersionCombo;
     QComboBox* m_textureFormatCombo;
     QLineEdit* m_createOutputPathEdit;
     QPushButton* m_browseOutputButton;

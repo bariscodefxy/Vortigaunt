@@ -84,6 +84,19 @@ public:
                        const std::vector<uint8_t>& bgColor = {0, 0, 0},
                        float contrast = 1.5f);
 
+    // Create a CSO (version 3) sprite: one DXT5 DDS per frame, which is what
+    // every sprite shipped with the game uses. Alpha is kept as it comes in, so
+    // a PNG with soft edges stays soft - there is no palette to flatten it into
+    // and no transparent colour to pick.
+    //
+    // Frames are padded out to a multiple of 4 with transparent pixels where
+    // they need it, because DXT5 compresses in 4x4 blocks.
+    bool createSpriteV3(const std::string& outputPath,
+                        const std::vector<std::string>& framePaths,
+                        int32_t spriteType = 2,
+                        int32_t textureFormat = 0,
+                        int32_t synchType = 1);
+
     // Convert V3 sprite to V2
     bool convertV3ToV2(const std::string& inputPath,
                       const std::string& outputPath,
@@ -110,6 +123,11 @@ public:
 private:
     bool loadVersion2(const std::vector<uint8_t>& data, size_t offset, bool transparent);
     bool loadVersion3(const std::vector<uint8_t>& data, size_t offset, bool transparent);
+
+#ifdef QT_WIDGETS_LIB
+    // Pad up to a multiple of 4 with transparent pixels, for DXT5's blocks.
+    static QImage padToBlockSize(const QImage& src);
+#endif
     bool loadLithtech(const std::vector<uint8_t>& data);
     
     bool isDdsFile(const std::vector<uint8_t>& data, size_t startPos, size_t& ddsPos);

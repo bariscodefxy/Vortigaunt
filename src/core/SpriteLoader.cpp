@@ -4,6 +4,7 @@
 #include "SpriteLoader.h"
 #include "core/VortigauntLog.h"
 #include "utils/FileIO.h"
+#include "utils/Dds.h"
 
 #include <fstream>
 #include <algorithm>
@@ -618,6 +619,99 @@ bool SpriteLoader::createSpriteV2(const std::string& outputPath,const std::vecto
 }
 
 
+
+#ifdef QT_WIDGETS_LIB
+QImage SpriteLoader::padToBlockSize(const QImage& src)
+{
+    if (src.isNull())
+        return src;
+
+    const int width = (src.width() + 3) / 4 * 4;
+    const int height = (src.height() + 3) / 4 * 4;
+    if (width == src.width() && height == src.height())
+        return src;
+
+    QImage padded(width, height, QImage::Format_RGBA8888);
+    padded.fill(QColor(0, 0, 0, 0));
+    for (int y = 0; y < src.height(); y++) {
+        const uint8_t* in = src.constScanLine(y);
+        uint8_t* out = padded.scanLine(y);
+        std::memcpy(out, in, static_cast<size_t>(src.width()) * 4);
+    }
+    return padded;
+}
+#endif
+
+bool SpriteLoader::createSpriteV3(const std::string& outputPath, const std::vector<std::string>& framePaths, int32_t spriteType, int32_t textureFormat, int32_t synchType)
+{
+#ifdef QT_WIDGETS_LIB
+    if (framePaths.empty())
+        return false;
+
+    std::vector<std::vector<uint8_t>> encodedFrames;
+    encodedFrames.reserve(framePaths.size());
+    int32_t maxWidth = 0;
+    int32_t maxHeight = 0;
+
+    for (const auto& framePath : framePaths) {
+        QImage img = ImageUtils::loadImage(framePath);
+        if (img.isNull())
+            continue;
+
+        img = padToBlockSize(img.convertToFormat(QImage::Format_RGBA8888));
+
+        std::vector<uint8_t> rgba(static_cast<size_t>(img.width()) * img.height() * 4);
+        for (int y = 0; y < img.height(); y++) {
+            std::memcpy(rgba.data() + static_cast<size_t>(y) * img.width() * 4,
+                        img.constScanLine(y), static_cast<size_t>(img.width()) * 4);
+        }
+
+        std::vector<uint8_t> dds = DDS::encodeDxt5Dds(rgba.data(), img.width(), img.height());
+        if (dds.empty())
+            continue;
+
+        maxWidth = std::max(maxWidth, static_cast<int32_t>(img.width()));
+        maxHeight = std::max(maxHeight, static_cast<int32_t>(img.height()));
+        encodedFrames.push_back(std::move(dds));
+    }
+
+    if (encodedFrames.empty())
+        return false;
+
+    std::ofstream outFile(FileIO::toPath(outputPath), std::ios::binary);
+    if (!outFile)
+        return false;
+
+    const uint32_t idsp = 0x50534449;  // "IDSP"
+    const int32_t version = 3;
+    const int32_t numFrames = static_cast<int32_t>(encodedFrames.size());
+    const float beamLength = 0.0f;
+    const float boundingRadius =
+        std::sqrt(static_cast<float>(maxWidth * maxWidth + maxHeight * maxHeight)) * 0.5f;
+
+    outFile.write(reinterpret_cast<const char*>(&idsp), 4);
+    outFile.write(reinterpret_cast<const char*>(&version), 4);
+    outFile.write(reinterpret_cast<const char*>(&spriteType), 4);
+    outFile.write(reinterpret_cast<const char*>(&textureFormat), 4);
+    outFile.write(reinterpret_cast<const char*>(&boundingRadius), 4);
+    outFile.write(reinterpret_cast<const char*>(&maxWidth), 4);
+    outFile.write(reinterpret_cast<const char*>(&maxHeight), 4);
+    outFile.write(reinterpret_cast<const char*>(&numFrames), 4);
+    outFile.write(reinterpret_cast<const char*>(&beamLength), 4);
+    outFile.write(reinterpret_cast<const char*>(&synchType), 4);
+
+
+    for (const auto& dds : encodedFrames) {
+        outFile.write(reinterpret_cast<const char*>(dds.data()),
+                      static_cast<std::streamsize>(dds.size()));
+    }
+
+    return outFile.good();
+#else
+    (void)outputPath; (void)framePaths; (void)spriteType; (void)textureFormat; (void)synchType;
+    return false;
+#endif
+}
 
 bool SpriteLoader::convertV3ToV2(const std::string& inputPath, const std::string& outputPath, int32_t spriteType, int32_t textureFormat, const std::vector<uint8_t>& bgColor, float contrast)
 {

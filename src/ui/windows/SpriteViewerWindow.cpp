@@ -949,6 +949,29 @@ QWidget* SpriteViewerWindow::createCreateTabWidget()
         m_createContrastLabel->setText(QString("%1x").arg(value / 10.0, 0, 'f', 1));
     });
     
+
+    // in short v2 is a 256 colour palette.
+	// v3 is a DXT5 texture per frame, so colours are not quantised and alpha is a real gradient.
+    auto* versionLayout = new QHBoxLayout();
+    versionLayout->addWidget(new QLabel(tr("Version:")));
+    m_spriteVersionCombo = new QComboBox();
+    m_spriteVersionCombo->addItem(tr("V2 - GoldSrc "), 2);
+    m_spriteVersionCombo->addItem(tr("V3 - CSO (DXT5, keeps alpha)"), 3);
+
+    versionLayout->addWidget(m_spriteVersionCombo, 1);
+    versionLayout->addStretch();
+
+    // The palette settings mean nothing for V3, so they are greyed out.
+    auto syncPaletteSettings = [this]() {
+        const bool isV3 = m_spriteVersionCombo->currentData().toInt() == 3;
+        m_textureFormatCombo->setEnabled(!isV3);
+        m_createTransColorButton->setEnabled(!isV3);
+        m_createContrastSlider->setEnabled(!isV3);
+    };
+    connect(m_spriteVersionCombo, &QComboBox::currentIndexChanged, this, syncPaletteSettings);
+    syncPaletteSettings();
+
+    settingsLayout->addLayout(versionLayout);
     settingsLayout->addLayout(typeLayout);
     settingsLayout->addLayout(formatLayout);
     settingsLayout->addLayout(transColorLayout);
@@ -2052,6 +2075,21 @@ void SpriteViewerWindow::onCreateSprite()
     
     // Get sprite settings
     int32_t spriteType = m_spriteTypeCombo->currentData().toInt();
+    // V3 carries its own alpha, so none of the palette settings apply to it.
+    if (m_spriteVersionCombo->currentData().toInt() == 3) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        const bool made = m_spriteLoader.createSpriteV3(outputPath.toStdString(), framePaths, spriteType);
+        QApplication::restoreOverrideCursor();
+
+        if (!made) {
+            QMessageBox::warning(this, tr("Error"), tr("Failed to create the V3 sprite."));
+            return;
+        }
+        QMessageBox::information(this, tr("Success"),
+            tr("V3 sprite created with %1 frame(s), one DXT5 texture each.").arg(framePaths.size()));
+        return;
+    }
+
     int32_t textureFormat = m_textureFormatCombo->currentData().toInt();
     
     // Use selected transparency color

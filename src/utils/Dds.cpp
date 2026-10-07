@@ -3,12 +3,13 @@
 #include <cstring>
 #include <filesystem>
 
+#include <algorithm>
+#include <cmath>
+
 namespace DDS {
 
-// ============================================================================
-// Block Decoders
-// ============================================================================
 
+// Block Decoders
 void decodeDXT1Block(const uint8_t* block, uint32_t* output, int x, int y, int width, int height)
 {
     uint16_t color0 = *reinterpret_cast<const uint16_t*>(block);
@@ -503,5 +504,285 @@ QImage loadDdsToQImage(const QString& filePath)
 }
 
 #endif // QT_WIDGETS_LIB
+
+
+
+// for write the v3 sprite frames
+namespace {
+
+constexpr uint32_t DDSD_CAPS = 0x00000001;
+constexpr uint32_t DDSD_HEIGHT = 0x00000002;
+constexpr uint32_t DDSD_WIDTH = 0x00000004;
+constexpr uint32_t DDSD_PIXELFORMAT = 0x00001000;
+constexpr uint32_t DDSD_MIPMAPCOUNT = 0x00020000;
+constexpr uint32_t DDSD_LINEARSIZE = 0x00080000;
+
+constexpr uint32_t DDPF_FOURCC = 0x00000004;
+constexpr uint32_t DDSCAPS_TEXTURE = 0x00001000;
+
+inline uint16_t toRgb565(int r, int g, int b)
+{
+    return static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
+}
+
+inline void fromRgb565(uint16_t c, int& r, int& g, int& b)
+{
+
+    const int r5 = (c >> 11) & 0x1F;
+    const int g6 = (c >> 5) & 0x3F;
+    const int b5 = c & 0x1F;
+    r = (r5 << 3) | (r5 >> 2);
+    g = (g6 << 2) | (g6 >> 4);
+    b = (b5 << 3) | (b5 >> 2);
+}
+
+void encodeAlpha(const uint8_t* rgbaBlock, uint8_t out[8])
+{
+    int lo = 255;
+    int hi = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        const int a = rgbaBlock[i * 4 + 3];
+        lo = std::min(lo, a);
+        hi = std::max(hi, a);
+    }
+
+    out[0] = static_cast<uint8_t>(hi);
+    out[1] = static_cast<uint8_t>(lo);
+
+    uint8_t codes[8];
+    codes[0] = static_cast<uint8_t>(hi);
+    codes[1] = static_cast<uint8_t>(lo);
+    if (hi > lo)
+    {
+        for (int i = 1; i <= 6; i++)
+        {
+            codes[i + 1] = static_cast<uint8_t>(((7 - i) * hi + i * lo) / 7);
+        }
+    }
+    else
+    {
+        for (int i = 2; i < 8; i++)
+        {
+            codes[i] = static_cast<uint8_t>(hi);
+        }
+    }
+
+    uint64_t bits = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        const int a = rgbaBlock[i * 4 + 3];
+        int best = 0;
+        int bestError = 256;
+        for (int c = 0; c < 8; c++)
+        {
+            const int error = std::abs(a - static_cast<int>(codes[c]));
+            if (error < bestError)
+            {
+                bestError = error;
+                best = c;
+            }
+        }
+        bits |= static_cast<uint64_t>(best) << (3 * i);
+    }
+
+    for (int i = 0; i < 6; i++)
+    {
+        out[2 + i] = static_cast<uint8_t>((bits >> (8 * i)) & 0xFF);
+    }
+}
+
+void encodeColour(const uint8_t* rgbaBlock, uint8_t out[8])
+{
+
+    int opaque = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        if (rgbaBlock[i * 4 + 3] > 0) opaque++;
+    }
+    const bool skipTransparent = (opaque > 0);
+
+    int mn[3] = { 255, 255, 255 };
+    int mx[3] = { 0, 0, 0 };
+    for (int i = 0; i < 16; i++)
+    {
+        if (skipTransparent && rgbaBlock[i * 4 + 3] == 0) continue;
+        for (int c = 0; c < 3; c++)
+        {
+            const int v = rgbaBlock[i * 4 + c];
+            mn[c] = std::min(mn[c], v);
+            mx[c] = std::max(mx[c], v);
+        }
+    }
+
+    int axis[3] = { mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2] };
+    if (axis[0] == 0 && axis[1] == 0 && axis[2] == 0)
+    {
+        axis[0] = 1;
+    }
+
+    int loProj = 1 << 30;
+    int hiProj = -(1 << 30);
+    int loColour[3] = { mn[0], mn[1], mn[2] };
+    int hiColour[3] = { mx[0], mx[1], mx[2] };
+    for (int i = 0; i < 16; i++)
+    {
+        if (skipTransparent && rgbaBlock[i * 4 + 3] == 0) continue;
+        const int r = rgbaBlock[i * 4 + 0];
+        const int g = rgbaBlock[i * 4 + 1];
+        const int b = rgbaBlock[i * 4 + 2];
+        const int proj = r * axis[0] + g * axis[1] + b * axis[2];
+        if (proj < loProj) { loProj = proj; loColour[0] = r; loColour[1] = g; loColour[2] = b; }
+        if (proj > hiProj) { hiProj = proj; hiColour[0] = r; hiColour[1] = g; hiColour[2] = b; }
+    }
+
+    uint16_t c0 = toRgb565(hiColour[0], hiColour[1], hiColour[2]);
+    uint16_t c1 = toRgb565(loColour[0], loColour[1], loColour[2]);
+
+    
+    if (c0 < c1)
+    {
+        std::swap(c0, c1);
+    }
+    if (c0 == c1)
+    {
+        out[0] = static_cast<uint8_t>(c0 & 0xFF);
+        out[1] = static_cast<uint8_t>(c0 >> 8);
+        out[2] = static_cast<uint8_t>(c1 & 0xFF);
+        out[3] = static_cast<uint8_t>(c1 >> 8);
+        out[4] = out[5] = out[6] = out[7] = 0;
+        return;
+    }
+
+    int palette[4][3];
+    fromRgb565(c0, palette[0][0], palette[0][1], palette[0][2]);
+    fromRgb565(c1, palette[1][0], palette[1][1], palette[1][2]);
+    for (int c = 0; c < 3; c++)
+    {
+        palette[2][c] = (2 * palette[0][c] + palette[1][c]) / 3;
+        palette[3][c] = (palette[0][c] + 2 * palette[1][c]) / 3;
+    }
+
+    uint32_t bits = 0;
+    for (int i = 0; i < 16; i++)
+    {
+        const int r = rgbaBlock[i * 4 + 0];
+        const int g = rgbaBlock[i * 4 + 1];
+        const int b = rgbaBlock[i * 4 + 2];
+        int best = 0;
+        int bestError = 1 << 30;
+        for (int p = 0; p < 4; p++)
+        {
+            const int dr = r - palette[p][0];
+            const int dg = g - palette[p][1];
+            const int db = b - palette[p][2];
+            const int error = dr * dr + dg * dg + db * db;
+            if (error < bestError)
+            {
+                bestError = error;
+                best = p;
+            }
+        }
+        bits |= static_cast<uint32_t>(best) << (2 * i);
+    }
+
+    out[0] = static_cast<uint8_t>(c0 & 0xFF);
+    out[1] = static_cast<uint8_t>(c0 >> 8);
+    out[2] = static_cast<uint8_t>(c1 & 0xFF);
+    out[3] = static_cast<uint8_t>(c1 >> 8);
+    for (int i = 0; i < 4; i++)
+    {
+        out[4 + i] = static_cast<uint8_t>((bits >> (8 * i)) & 0xFF);
+    }
+}
+
+void write32(std::vector<uint8_t>& out, uint32_t value)
+{
+    out.push_back(static_cast<uint8_t>(value & 0xFF));
+    out.push_back(static_cast<uint8_t>((value >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((value >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((value >> 24) & 0xFF));
+}
+
+}  // namespace
+
+void encodeDxt5Block(const uint8_t* rgbaBlock, uint8_t out[16])
+{
+    encodeAlpha(rgbaBlock, out);
+    encodeColour(rgbaBlock, out + 8);
+}
+
+size_t dxt5DdsSize(int width, int height)
+{
+    if (width <= 0 || height <= 0)
+    {
+        return 0;
+    }
+    const size_t blocks = static_cast<size_t>((width + 3) / 4) * static_cast<size_t>((height + 3) / 4);
+    return 128 + blocks * 16;
+}
+
+std::vector<uint8_t> encodeDxt5Dds(const uint8_t* rgba, int width, int height)
+{
+    std::vector<uint8_t> out;
+    if (!rgba || width <= 0 || height <= 0 || (width % 4) != 0 || (height % 4) != 0)
+    {
+        return out;
+    }
+
+    const uint32_t blocksX = static_cast<uint32_t>(width / 4);
+    const uint32_t blocksY = static_cast<uint32_t>(height / 4);
+    const uint32_t linearSize = blocksX * blocksY * 16;
+
+    out.reserve(dxt5DdsSize(width, height));
+
+    write32(out, DDS_MAGIC);
+    write32(out, 124);  // dwSize
+    write32(out, DDSD_CAPS | DDSD_HEIGHT | DDSD_WIDTH | DDSD_PIXELFORMAT | DDSD_MIPMAPCOUNT | DDSD_LINEARSIZE);
+    write32(out, static_cast<uint32_t>(height));
+    write32(out, static_cast<uint32_t>(width));
+    write32(out, linearSize);
+    write32(out, 1);  // dwDepth
+    write32(out, 1);  // dwMipMapCount
+    for (int i = 0; i < 11; i++)
+    {
+        write32(out, 0);  // dwReserved1
+    }
+
+    write32(out, 32);  // ddspf.dwSize
+    write32(out, DDPF_FOURCC);
+    write32(out, FOURCC_DXT5);
+    write32(out, 0);  // bit count and the four masks are unused for a fourCC format
+    write32(out, 0);
+    write32(out, 0);
+    write32(out, 0);
+    write32(out, 0);
+
+    write32(out, DDSCAPS_TEXTURE);
+    write32(out, 0);  // dwCaps2
+    write32(out, 0);  // dwCaps3
+    write32(out, 0);  // dwCaps4
+    write32(out, 0);  // dwReserved2
+
+    // Blocks, left to right then top to bottom.
+    uint8_t block[16 * 4];
+    uint8_t encoded[16];
+    for (uint32_t by = 0; by < blocksY; by++)
+    {
+        for (uint32_t bx = 0; bx < blocksX; bx++)
+        {
+            for (int y = 0; y < 4; y++)
+            {
+                const uint8_t* row = rgba + ((static_cast<size_t>(by) * 4 + y) * static_cast<size_t>(width) +
+                                             static_cast<size_t>(bx) * 4) * 4;
+                std::memcpy(block + y * 16, row, 16);
+            }
+            encodeDxt5Block(block, encoded);
+            out.insert(out.end(), encoded, encoded + 16);
+        }
+    }
+
+    return out;
+}
 
 } // namespace DDS

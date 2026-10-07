@@ -4,6 +4,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # MSE (Metin2 Script Effect) - disabled by default, enable with -DMETIN2_SCRIPT_EFFECT=ON
 option(METIN2_SCRIPT_EFFECT "Enable Metin2 Script Effect support" OFF)
 
+# GoldSrc Auto-Rig - kept in the tree but out of the build and out of the
+# menus unless asked for: -DVORTIGAUNT_AUTORIG=ON
+option(VORTIGAUNT_AUTORIG "Enable the GoldSrc Auto-Rig tool" OFF)
+
 set(VORTIGAUNT_CORE_HEADERS
     core/converters/Gr2Converter.h
     core/WadMaker.h
@@ -15,8 +19,6 @@ set(VORTIGAUNT_CORE_HEADERS
     core/extractors/xfs/XfsExtractor.h
 
     core/smd/SmdParser.h
-    core/autorig/AutoRig.h
-    core/autorig/HeatRig.h
     
     core/extractors/rez/RezExtractor.h
     core/extractors/pak/SnowCipher.h
@@ -53,7 +55,6 @@ set(VORTIGAUNT_GUI_HEADERS
     ui/dialogs/LoLModelDownloadDialog.h
     ui/dialogs/SteamWorkshopDownloaderDialog.h
     core/SteamWorkshopDownloader.h
-    ui/dialogs/AutoRigDialog.h
     ui/dialogs/WadMakerDialog.h
     ui/dialogs/AboutDialog.h
     
@@ -87,8 +88,6 @@ set(VORTIGAUNT_CORE
     core/extractors/xfs/XfsExtractor.cpp
 
     core/smd/SmdParser.cpp
-    core/autorig/AutoRig.cpp
-    core/autorig/HeatRig.cpp
     core/extractors/rez/RezExtractor.cpp
     utils/fsutils.cpp
     utils/Platform.cpp
@@ -151,7 +150,6 @@ set(VORTIGAUNT_GUI
     ui/dialogs/LoLModelDownloadDialog.cpp
     ui/dialogs/SteamWorkshopDownloaderDialog.cpp
     core/SteamWorkshopDownloader.cpp
-    ui/dialogs/AutoRigDialog.cpp
     ui/dialogs/WadMakerDialog.cpp
     ui/dialogs/AboutDialog.cpp
     
@@ -196,6 +194,20 @@ endif()
 if(METIN2_SCRIPT_EFFECT)
     target_sources(VortigauntTool PRIVATE core/MseLoader.h core/MseLoader.cpp core/MdeLoader.h core/MdeLoader.cpp)
     target_compile_definitions(VortigauntTool PRIVATE METIN2_SCRIPT_EFFECT)
+endif()
+
+# Auto-Rig: the solvers plus the dialog that drives them. Everything stays
+# in the repository; with the option off none of it reaches the binary and
+# the menu entry is not built either.
+if(VORTIGAUNT_AUTORIG)
+    target_sources(VortigauntTool PRIVATE
+        core/autorig/AutoRig.h core/autorig/AutoRig.cpp
+        core/autorig/HeatRig.h core/autorig/HeatRig.cpp
+        core/autorig/MeshBvh.h core/autorig/MeshBvh.cpp
+        core/autorig/WeightTransfer.h core/autorig/WeightTransfer.cpp
+        core/autorig/SkeletonMath.h core/autorig/SkeletonMath.cpp
+    )
+    target_compile_definitions(VortigauntTool PRIVATE ENABLE_AUTORIG)
 endif()
 
 
@@ -252,6 +264,18 @@ if(BUILD_GUI)
             ui/widgets/MseSprExporter.cpp
         )
         target_compile_definitions(VortigauntTool_gui PRIVATE METIN2_SCRIPT_EFFECT)
+    endif()
+
+    if(VORTIGAUNT_AUTORIG)
+        target_sources(VortigauntTool_gui PRIVATE
+        core/autorig/AutoRig.h core/autorig/AutoRig.cpp
+        core/autorig/HeatRig.h core/autorig/HeatRig.cpp
+        core/autorig/MeshBvh.h core/autorig/MeshBvh.cpp
+        core/autorig/WeightTransfer.h core/autorig/WeightTransfer.cpp
+        core/autorig/SkeletonMath.h core/autorig/SkeletonMath.cpp
+        ui/dialogs/AutoRigDialog.h ui/dialogs/AutoRigDialog.cpp
+        )
+        target_compile_definitions(VortigauntTool_gui PRIVATE ENABLE_AUTORIG)
     endif()
 
     # Qt Translation files

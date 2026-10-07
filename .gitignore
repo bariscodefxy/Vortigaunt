@@ -27,3 +27,19 @@ src/ui/widgets/MseSmdExporter.cpp
 src/ui/widgets/MseSprExporter.cpp
 
 # AnimationClip not ready.
+
+# Auto-Rig not ready. Build it with -DVORTIGAUNT_AUTORIG=ON.
+src/core/autorig/AutoRig.h
+src/core/autorig/AutoRig.cpp
+src/core/autorig/HeatRig.h
+src/core/autorig/HeatRig.cpp
+src/core/autorig/MeshBvh.h
+src/core/autorig/MeshBvh.cpp
+src/core/autorig/WeightTransfer.h
+src/core/autorig/WeightTransfer.cpp
+src/core/autorig/SkeletonMath.h
+src/core/autorig/SkeletonMath.cpp
+src/core/autorig/PoseTransfer.h
+src/core/autorig/PoseTransfer.cpp
+src/ui/dialogs/AutoRigDialog.h
+src/ui/dialogs/AutoRigDialog.cpp

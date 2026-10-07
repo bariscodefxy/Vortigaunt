@@ -1,8 +1,11 @@
 #include "AutoRig.h"
+#include "MeshBvh.h"
+#include "SkeletonMath.h"
 #include "core/smd/SmdParser.h"
 #include <limits>
 #include <cmath>
 #include <algorithm>
+#include <cctype>
 #include <unordered_map>
 #include <unordered_set>
 #include <queue>
@@ -86,8 +89,25 @@ std::vector<AutoRig::NonDeformerBone> AutoRig::DetectNonDeformerBones() const {
                           parentIdx != static_cast<int>(i));
         bool hasChildren = !m_boneChildren[i].empty();
 
+
+        const size_t firstChar = m_bones[i].name.find_first_not_of(" \t");
+        if (firstChar != std::string::npos && m_bones[i].name.compare(firstChar, 2, "--") == 0) {
+            found.push_back({static_cast<int>(i), "a helper bone by the \"--\" naming convention, not a deformer"});
+            continue;
+        }
+        
+
         if (!hasParent && !hasChildren) {
             found.push_back({static_cast<int>(i), "detached from the skeleton, no animation moves it with the mesh"});
+            continue;
+        }
+
+        // The root of a character rig carries the whole model and the animation
+        // translates it; geometry bound to it follows no limb at all. Guarded by
+        // a bone count so a simple prop whose root is its only real bone is left
+        // alone.
+        if (!hasParent && hasChildren && m_bones.size() > 4) {
+            found.push_back({static_cast<int>(i), "the root carries the whole model, it does not deform it"});
             continue;
         }
 
@@ -109,6 +129,7 @@ std::vector<AutoRig::NonDeformerBone> AutoRig::DetectNonDeformerBones() const {
 
     return found;
 }
+
 
 void AutoRig::SetIgnoredBones(const std::unordered_set<int>& ignoredBones) {
     m_ignoredBones = ignoredBones;
@@ -261,7 +282,10 @@ static float PointToSegmentDistSq(const aiVector3D& point, const aiVector3D& seg
     return diff.x * diff.x + diff.y * diff.y + diff.z * diff.z;
 }
 
-int AutoRig::FindNearestBone(float x, float y, float z, float nx, float ny, float nz, bool useDepthPenalty) const {
+
+
+int AutoRig::FindNearestBone(float x, float y, float z, float /*nx*/, float /*ny*/, float /*nz*/,
+                             bool useDepthPenalty) const {
     if (m_boneWorldPositions.empty()) {
         return 0;
     }
@@ -272,8 +296,6 @@ int AutoRig::FindNearestBone(float x, float y, float z, float nx, float ny, floa
     aiVector3D vertex(x, y, z);
     constexpr float DEPTH_PENALTY = 0.005f; // it was 0.03
     
-    // Normal filtering
-    bool hasNormal = (nx * nx + ny * ny + nz * nz) > 0.001f;
 
     for (size_t p = 0; p < m_boneWorldPositions.size(); p++) {
         const aiVector3D& parentPos = m_boneWorldPositions[p];
@@ -578,6 +600,7 @@ std::vector<int> AutoRig::RigTriangles(const std::vector<float>& vertexPositions
     return boneIndices;
 }
 
+
 std::vector<heatrig::BoneSegment> AutoRig::BuildDeformerSegments() const {
     std::vector<heatrig::BoneSegment> segments;
     segments.reserve(m_bones.size());
@@ -627,6 +650,228 @@ std::vector<heatrig::BoneSegment> AutoRig::BuildDeformerSegments() const {
     return segments;
 }
 
+std::pair<aiVector3D, aiVector3D> AutoRig::BoneSegmentOf(int bone) const
+{
+    const aiVector3D head = m_boneWorldPositions[bone];
+
+    const float ownLength = (bone < static_cast<int>(m_boneLengths.size())) ? m_boneLengths[bone] : 0.0f;
+    const float minContinuation = 0.35f * ownLength;
+
+    int continuation = -1;
+    float longest = 0.0f;
+    for (int child : m_boneChildren[bone])
+    {
+        if (m_ignoredBones.find(child) != m_ignoredBones.end())
+        {
+            continue;
+        }
+        const float length = (m_boneWorldPositions[child] - head).Length();
+        if (length < minContinuation)
+        {
+            continue;
+        }
+        if (length > longest)
+        {
+            longest = length;
+            continuation = child;
+        }
+    }
+
+    if (continuation >= 0)
+    {
+        return { head, m_boneWorldPositions[continuation] };
+    }
+
+    // A tip bone: carry on the way it came, as far as it is long.
+    aiVector3D direction(0.0f, 0.0f, 1.0f);
+    const int parent = m_bones[bone].parentIndex;
+    if (parent >= 0 && parent < static_cast<int>(m_boneWorldPositions.size()))
+    {
+        aiVector3D fromParent = head - m_boneWorldPositions[parent];
+        if (fromParent.SquareLength() > 1e-8f)
+        {
+            direction = fromParent;
+            direction.NormalizeSafe();
+        }
+    }
+    float length = (bone < static_cast<int>(m_boneLengths.size())) ? m_boneLengths[bone] : 0.0f;
+    if (length < 1e-3f)
+    {
+        length = 5.0f;
+    }
+    return { head, head + direction * length };
+}
+
+int AutoRig::SnapSeamsToJoints(const std::vector<float>& vertexPositions,
+                               std::vector<int>& boneIndices,
+                               float /*bandFraction*/) const
+{
+    if (boneIndices.empty() || m_boneWorldPositions.empty())
+    {
+        return 0;
+    }
+
+    // Cache each bone's segment once.
+    std::vector<std::pair<aiVector3D, aiVector3D>> segments(m_bones.size());
+    for (size_t i = 0; i < m_bones.size(); i++)
+    {
+        segments[i] = BoneSegmentOf(static_cast<int>(i));
+    }
+
+    auto distanceToBone = [&](const aiVector3D& p, int bone) {
+        const aiVector3D closest = autorig::ClosestPointOnSegment(p, segments[bone].first, segments[bone].second);
+        return (p - closest).Length();
+    };
+
+    int moved = 0;
+    const size_t vertexCount = std::min(boneIndices.size(), vertexPositions.size() / 3);
+
+    // Two sweeps, so a vertex can travel one step further along the chain if it
+    // really belongs there.
+    for (int sweep = 0; sweep < 2; sweep++)
+    {
+        bool changed = false;
+        for (size_t v = 0; v < vertexCount; v++)
+        {
+            const int assigned = boneIndices[v];
+            if (assigned < 0 || assigned >= static_cast<int>(m_bones.size()))
+            {
+                continue;
+            }
+
+            const aiVector3D p(vertexPositions[v * 3 + 0],
+                               vertexPositions[v * 3 + 1],
+                               vertexPositions[v * 3 + 2]);
+
+            // Only the bones next door are considered, so this corrects a seam
+            // without re-rigging: a vertex can move between a bone, its parent
+            // and its children, never to the other side of the body.
+            int best = assigned;
+            float bestDistance = distanceToBone(p, assigned);
+
+            auto consider = [&](int candidate) {
+                if (candidate < 0 || candidate >= static_cast<int>(m_bones.size())) return;
+                if (m_ignoredBones.find(candidate) != m_ignoredBones.end()) return;
+                const float d = distanceToBone(p, candidate);
+                // A clear improvement only, or a seam would jitter back and forth.
+                if (d < bestDistance - 0.05f)
+                {
+                    bestDistance = d;
+                    best = candidate;
+                }
+            };
+
+            consider(m_bones[assigned].parentIndex);
+            for (int child : m_boneChildren[assigned])
+            {
+                consider(child);
+            }
+
+            if (best != assigned)
+            {
+                boneIndices[v] = best;
+                moved++;
+                changed = true;
+            }
+        }
+        if (!changed)
+        {
+            break;
+        }
+    }
+
+    return moved;
+}
+
+AutoRig::ReferenceRigResult AutoRig::RigTrianglesWithReference(
+    const std::vector<float>& vertexPositions,
+    const std::vector<SmdBone>& referenceBones,
+    const std::vector<float>& referencePositions,
+    const std::vector<int>& referenceBoneIndices,
+    const weighttransfer::Options& transferOptions,
+    const heatrig::Options& heatOptions)
+{
+    ReferenceRigResult result;
+
+    if (m_bones.empty())
+    {
+        result.error = "No skeleton loaded.";
+        m_error = result.error;
+        return result;
+    }
+    if (referenceBones.empty() || referenceBoneIndices.empty())
+    {
+        result.error = "The reference model carries no skeleton or no vertex weights.";
+        m_error = result.error;
+        return result;
+    }
+
+    std::vector<int> referenceToOurs =
+        autorig::MatchBonesByNameWithFallback(referenceBones, m_bones, &result.unmatchedReferenceBones);
+
+    for (int& mapped : referenceToOurs)
+    {
+        if (mapped >= 0)
+        {
+            mapped = ResolveNonIgnoredBone(mapped);
+        }
+    }
+
+    weighttransfer::ReferenceMesh reference;
+    reference.positions = referencePositions;
+    reference.boneIndices.reserve(referenceBoneIndices.size());
+    for (int bone : referenceBoneIndices)
+    {
+        const bool valid = bone >= 0 && bone < static_cast<int>(referenceToOurs.size());
+        reference.boneIndices.push_back(valid ? referenceToOurs[bone] : -1);
+    }
+
+    result.transfer = weighttransfer::Transfer(vertexPositions, reference, transferOptions);
+    if (!result.transfer.ok)
+    {
+        result.error = result.transfer.error;
+        m_error = result.error;
+        return result;
+    }
+
+    result.boneIndices = result.transfer.boneIndices;
+
+    // --- the heat solver answers for whatever the reference did not cover ---
+    bool anyGap = false;
+    for (int bone : result.boneIndices)
+    {
+        if (bone < 0)
+        {
+            anyGap = true;
+            break;
+        }
+    }
+
+    if (anyGap)
+    {
+        result.heat = RigTrianglesHeat(vertexPositions, heatOptions);
+        if (!result.heat.ok)
+        {
+            result.error = result.heat.error;
+            m_error = result.error;
+            return result;
+        }
+        for (size_t i = 0; i < result.boneIndices.size(); i++)
+        {
+            if (result.boneIndices[i] < 0)
+            {
+                result.boneIndices[i] = result.heat.boneIndices[i];
+                result.filledByHeat++;
+            }
+        }
+    }
+
+    result.seamSnappedVertices = SnapSeamsToJoints(vertexPositions, result.boneIndices);
+
+    result.ok = true;
+    return result;
+}
+
 heatrig::Result AutoRig::RigTrianglesHeat(const std::vector<float>& vertexPositions,
                                           const heatrig::Options& options) {
     heatrig::Result result;
@@ -650,6 +895,7 @@ heatrig::Result AutoRig::RigTrianglesHeat(const std::vector<float>& vertexPositi
     }
     return result;
 }
+
 
 std::vector<int> AutoRig::RigMesh(const aiMesh* mesh) {
     std::vector<int> boneIndices;

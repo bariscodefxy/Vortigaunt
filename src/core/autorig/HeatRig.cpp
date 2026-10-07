@@ -1,5 +1,7 @@
 #include "HeatRig.h"
 
+#include "MeshBvh.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -13,345 +15,12 @@ namespace {
 // Mind its operators: a * b is the DOT product and a ^ b the CROSS product,
 // only a * scalar scales.
 
-// Closest point on segment [s,e] to p.
-aiVector3D ClosestOnSegment(const aiVector3D& p, const aiVector3D& s, const aiVector3D& e) {
-    aiVector3D seg = e - s;
-    float segLenSq = seg.SquareLength();
-    if (segLenSq < 1e-12f) {
-        return s;
-    }
-    float t = ((p - s) * seg) / segLenSq;
-    t = std::max(0.0f, std::min(1.0f, t));
-    return s + seg * t;
-}
-
 struct BoneTable {
     std::vector<int>              boneId;        // slot -> bone index as handed in
     std::vector<aiVector3D>             head;          // slot -> bone world position
     std::vector<std::vector<int>> segments;      // slot -> indices into the input segments
     std::vector<int>              parentSlot;    // slot -> slot of the bone it hangs off, or -1
 };
-
-struct WeldedMesh {
-    std::vector<aiVector3D> positions;
-    std::vector<aiVector3D> normals;
-    std::vector<int>  triangles;     // 3 welded indices per triangle
-    std::vector<int>  originalToWelded;
-    std::vector<std::vector<int>> neighbors;
-    std::vector<std::vector<int>> vertexTriangles;
-};
-
-struct Bounds {
-    aiVector3D mn{ std::numeric_limits<float>::max(),  std::numeric_limits<float>::max(),  std::numeric_limits<float>::max() };
-    aiVector3D mx{ -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(), -std::numeric_limits<float>::max() };
-
-    void Expand(const aiVector3D& p) {
-        mn.x = std::min(mn.x, p.x); mn.y = std::min(mn.y, p.y); mn.z = std::min(mn.z, p.z);
-        mx.x = std::max(mx.x, p.x); mx.y = std::max(mx.y, p.y); mx.z = std::max(mx.z, p.z);
-    }
-    void Expand(const Bounds& b) { Expand(b.mn); Expand(b.mx); }
-    aiVector3D Center() const { return (mn + mx) * 0.5f; }
-    int  WidestAxis() const {
-        aiVector3D d = mx - mn;
-        if (d.x >= d.y && d.x >= d.z) return 0;
-        return (d.y >= d.z) ? 1 : 2;
-    }
-};
-
-inline float AxisOf(const aiVector3D& v, int axis) { return axis == 0 ? v.x : (axis == 1 ? v.y : v.z); }
-
-
-struct CellKey {
-    int x, y, z;
-    bool operator==(const CellKey& o) const { return x == o.x && y == o.y && z == o.z; }
-};
-
-struct CellHash {
-    size_t operator()(const CellKey& k) const {
-        // Three large primes; good enough for the vertex counts GoldSrc models reach.
-        size_t h = static_cast<size_t>(static_cast<uint32_t>(k.x)) * 73856093u;
-        h ^= static_cast<size_t>(static_cast<uint32_t>(k.y)) * 19349663u;
-        h ^= static_cast<size_t>(static_cast<uint32_t>(k.z)) * 83492791u;
-        return h;
-    }
-};
-
-
-
-void WeldVertices(const std::vector<float>& positions, float epsilon, WeldedMesh& out) {
-    size_t inputCount = positions.size() / 3;
-    out.originalToWelded.assign(inputCount, -1);
-
-    float cellSize = std::max(epsilon, 1e-5f);
-    float epsSq = epsilon * epsilon;
-    std::unordered_map<CellKey, std::vector<int>, CellHash> grid;
-
-    auto cellOf = [cellSize](const aiVector3D& p) -> CellKey {
-        return {static_cast<int>(std::floor(p.x / cellSize)),
-                static_cast<int>(std::floor(p.y / cellSize)),
-                static_cast<int>(std::floor(p.z / cellSize))};
-    };
-
-    for (size_t i = 0; i < inputCount; i++) {
-        aiVector3D p(positions[i * 3 + 0], positions[i * 3 + 1], positions[i * 3 + 2]);
-        CellKey base = cellOf(p);
-
-        int found = -1;
-        for (int dx = -1; dx <= 1 && found < 0; dx++) {
-            for (int dy = -1; dy <= 1 && found < 0; dy++) {
-                for (int dz = -1; dz <= 1 && found < 0; dz++) {
-                    auto it = grid.find({base.x + dx, base.y + dy, base.z + dz});
-                    if (it == grid.end()) continue;
-                    for (int candidate : it->second) {
-                        if ((out.positions[candidate] - p).SquareLength() <= epsSq) {
-                            found = candidate;
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        if (found < 0) {
-            found = static_cast<int>(out.positions.size());
-            out.positions.push_back(p);
-            grid[base].push_back(found);
-        }
-        out.originalToWelded[i] = found;
-    }
-}
-
-void BuildTopology(WeldedMesh& mesh, size_t inputVertexCount) {
-    size_t triCount = inputVertexCount / 3;
-    mesh.triangles.reserve(triCount * 3);
-
-    for (size_t t = 0; t < triCount; t++) {
-        int a = mesh.originalToWelded[t * 3 + 0];
-        int b = mesh.originalToWelded[t * 3 + 1];
-        int c = mesh.originalToWelded[t * 3 + 2];
-        if (a == b || b == c || a == c) {
-            continue;  // collapsed by welding, carries no topology
-        }
-        mesh.triangles.push_back(a);
-        mesh.triangles.push_back(b);
-        mesh.triangles.push_back(c);
-    }
-
-    size_t vertexCount = mesh.positions.size();
-    mesh.neighbors.assign(vertexCount, {});
-    mesh.vertexTriangles.assign(vertexCount, {});
-
-    for (size_t t = 0; t * 3 < mesh.triangles.size(); t++) {
-        int idx[3] = {mesh.triangles[t * 3 + 0], mesh.triangles[t * 3 + 1], mesh.triangles[t * 3 + 2]};
-        for (int k = 0; k < 3; k++) {
-            mesh.vertexTriangles[idx[k]].push_back(static_cast<int>(t));
-            for (int j = 0; j < 3; j++) {
-                if (j == k) continue;
-                auto& list = mesh.neighbors[idx[k]];
-                if (std::find(list.begin(), list.end(), idx[j]) == list.end()) {
-                    list.push_back(idx[j]);
-                }
-            }
-        }
-    }
-}
-
-// Area weighted vertex normals; used to push bones that sit on the wrong side of
-// the surface away, the way Blender's heat_source_distance does.
-void ComputeNormals(WeldedMesh& mesh) {
-    mesh.normals.assign(mesh.positions.size(), aiVector3D());
-
-    for (size_t t = 0; t * 3 < mesh.triangles.size(); t++) {
-        const aiVector3D& a = mesh.positions[mesh.triangles[t * 3 + 0]];
-        const aiVector3D& b = mesh.positions[mesh.triangles[t * 3 + 1]];
-        const aiVector3D& c = mesh.positions[mesh.triangles[t * 3 + 2]];
-        aiVector3D n = (b - a) ^ (c - a);  // cross product, length is twice the triangle area
-        for (int k = 0; k < 3; k++) {
-            int v = mesh.triangles[t * 3 + k];
-            mesh.normals[v] = mesh.normals[v] + n;
-        }
-    }
-
-    for (aiVector3D& n : mesh.normals) {
-        n.NormalizeSafe();
-    }
-}
-
-
-class TriangleBvh {
-public:
-    void Build(const WeldedMesh& mesh) {
-        m_mesh = &mesh;
-        size_t triCount = mesh.triangles.size() / 3;
-        m_indices.resize(triCount);
-        for (size_t i = 0; i < triCount; i++) {
-            m_indices[i] = static_cast<int>(i);
-        }
-        m_nodes.clear();
-        if (triCount == 0) {
-            return;
-        }
-        m_nodes.reserve(triCount * 2);
-        BuildNode(0, static_cast<int>(triCount));
-    }
-
-    // True if any triangle blocks the straight line from `origin` to `target`.
-    // Triangles touching `skipVertex` are ignored so a vertex never occludes itself.
-    bool IsOccluded(const aiVector3D& origin, const aiVector3D& target, int skipVertex) const {
-        if (m_nodes.empty()) {
-            return false;
-        }
-        aiVector3D dir = target - origin;
-        float len = dir.Length();
-        if (len < 1e-6f) {
-            return false;
-        }
-        dir = dir * (1.0f / len);
-
-        // Start slightly off the surface, and stop slightly short of the bone.
-        const float tMin = std::min(1e-3f, len * 0.01f);
-        const float tMax = len * 0.999f;
-
-        aiVector3D invDir(SafeInv(dir.x), SafeInv(dir.y), SafeInv(dir.z));
-        return Traverse(0, origin, dir, invDir, tMin, tMax, skipVertex);
-    }
-
-private:
-    struct Node {
-        Bounds bounds;
-        int start = 0;
-        int count = 0;
-        int left = -1;
-        int right = -1;
-    };
-
-    static float SafeInv(float v) {
-        return (std::abs(v) < 1e-12f) ? std::numeric_limits<float>::max() : 1.0f / v;
-    }
-
-    Bounds TriangleBounds(int tri) const {
-        Bounds b;
-        for (int k = 0; k < 3; k++) {
-            b.Expand(m_mesh->positions[m_mesh->triangles[tri * 3 + k]]);
-        }
-        return b;
-    }
-
-    int BuildNode(int start, int count) {
-        int nodeIndex = static_cast<int>(m_nodes.size());
-        m_nodes.push_back(Node{});
-
-        Bounds bounds;
-        Bounds centroidBounds;
-        for (int i = start; i < start + count; i++) {
-            Bounds tb = TriangleBounds(m_indices[i]);
-            bounds.Expand(tb);
-            centroidBounds.Expand(tb.Center());
-        }
-        m_nodes[nodeIndex].bounds = bounds;
-
-        constexpr int kLeafSize = 4;
-        if (count <= kLeafSize) {
-            m_nodes[nodeIndex].start = start;
-            m_nodes[nodeIndex].count = count;
-            return nodeIndex;
-        }
-
-        int axis = centroidBounds.WidestAxis();
-        float split = AxisOf(centroidBounds.Center(), axis);
-
-        auto middle = std::partition(m_indices.begin() + start, m_indices.begin() + start + count,
-                                     [&](int tri) {
-                                         return AxisOf(TriangleBounds(tri).Center(), axis) < split;
-                                     });
-        int leftCount = static_cast<int>(middle - (m_indices.begin() + start));
-        if (leftCount == 0 || leftCount == count) {
-            leftCount = count / 2;  // degenerate spread, fall back to a median split
-        }
-
-        int left = BuildNode(start, leftCount);
-        int right = BuildNode(start + leftCount, count - leftCount);
-        m_nodes[nodeIndex].left = left;
-        m_nodes[nodeIndex].right = right;
-        return nodeIndex;
-    }
-
-    static bool SlabTest(const Bounds& b, const aiVector3D& origin, const aiVector3D& invDir, float tMin, float tMax) {
-        float t0 = (b.mn.x - origin.x) * invDir.x;
-        float t1 = (b.mx.x - origin.x) * invDir.x;
-        if (t0 > t1) std::swap(t0, t1);
-        tMin = std::max(tMin, t0); tMax = std::min(tMax, t1);
-        if (tMin > tMax) return false;
-
-        t0 = (b.mn.y - origin.y) * invDir.y;
-        t1 = (b.mx.y - origin.y) * invDir.y;
-        if (t0 > t1) std::swap(t0, t1);
-        tMin = std::max(tMin, t0); tMax = std::min(tMax, t1);
-        if (tMin > tMax) return false;
-
-        t0 = (b.mn.z - origin.z) * invDir.z;
-        t1 = (b.mx.z - origin.z) * invDir.z;
-        if (t0 > t1) std::swap(t0, t1);
-        tMin = std::max(tMin, t0); tMax = std::min(tMax, t1);
-        return tMin <= tMax;
-    }
-
-    // Moller-Trumbore, double sided: the mesh may not be consistently wound.
-    bool RayHitsTriangle(int tri, const aiVector3D& origin, const aiVector3D& dir,
-                         float tMin, float tMax, int skipVertex) const {
-        int i0 = m_mesh->triangles[tri * 3 + 0];
-        int i1 = m_mesh->triangles[tri * 3 + 1];
-        int i2 = m_mesh->triangles[tri * 3 + 2];
-        if (i0 == skipVertex || i1 == skipVertex || i2 == skipVertex) {
-            return false;
-        }
-
-        const aiVector3D& v0 = m_mesh->positions[i0];
-        aiVector3D edge1 = m_mesh->positions[i1] - v0;
-        aiVector3D edge2 = m_mesh->positions[i2] - v0;
-
-        aiVector3D pvec = dir ^ edge2;
-        float det = edge1 * pvec;
-        if (std::abs(det) < 1e-9f) {
-            return false;  // ray parallel to the triangle
-        }
-        float invDet = 1.0f / det;
-
-        aiVector3D tvec = origin - v0;
-        float u = (tvec * pvec) * invDet;
-        if (u < 0.0f || u > 1.0f) return false;
-
-        aiVector3D qvec = tvec ^ edge1;
-        float v = (dir * qvec) * invDet;
-        if (v < 0.0f || u + v > 1.0f) return false;
-
-        float t = (edge2 * qvec) * invDet;
-        return t > tMin && t < tMax;
-    }
-
-    bool Traverse(int nodeIndex, const aiVector3D& origin, const aiVector3D& dir, const aiVector3D& invDir,
-                  float tMin, float tMax, int skipVertex) const {
-        const Node& node = m_nodes[nodeIndex];
-        if (!SlabTest(node.bounds, origin, invDir, tMin, tMax)) {
-            return false;
-        }
-        if (node.count > 0) {
-            for (int i = node.start; i < node.start + node.count; i++) {
-                if (RayHitsTriangle(m_indices[i], origin, dir, tMin, tMax, skipVertex)) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        return Traverse(node.left, origin, dir, invDir, tMin, tMax, skipVertex) ||
-               Traverse(node.right, origin, dir, invDir, tMin, tMax, skipVertex);
-    }
-
-    const WeldedMesh* m_mesh = nullptr;
-    std::vector<Node> m_nodes;
-    std::vector<int>  m_indices;
-};
-
 
 struct SparseMatrix {
     int n = 0;
@@ -451,7 +120,7 @@ double CotangentAt(const aiVector3D& corner, const aiVector3D& a, const aiVector
     return static_cast<double>(u * v) / cross;
 }
 
-void BuildLaplacian(const WeldedMesh& mesh, std::vector<std::unordered_map<int, double>>& edgeWeights, std::vector<double>& vertexAreas) {
+void BuildLaplacian(const autorig::WeldedMesh& mesh, std::vector<std::unordered_map<int, double>>& edgeWeights, std::vector<double>& vertexAreas) {
     int n = static_cast<int>(mesh.positions.size());
     edgeWeights.assign(n, {});
     vertexAreas.assign(n, 0.0);
@@ -543,7 +212,7 @@ float SourceDistance(const aiVector3D& position, const aiVector3D& normal, const
 
     for (int segIndex : table.segments[slot]) {
         const BoneSegment& s = segments[segIndex];
-        aiVector3D closest = ClosestOnSegment(position, s.start, s.end);
+        aiVector3D closest = autorig::ClosestPointOnSegment(position, s.start, s.end);
         aiVector3D delta = position - closest;
         float dist = delta.Length();
 
@@ -576,10 +245,7 @@ Result Solve(const std::vector<float>& positions, const std::vector<BoneSegment>
         return result;
     }
 
-    WeldedMesh mesh;
-    WeldVertices(positions, options.weldEpsilon, mesh);
-    BuildTopology(mesh, inputCount);
-    ComputeNormals(mesh);
+    autorig::WeldedMesh mesh = autorig::BuildWeldedMesh(positions, options.weldEpsilon);
 
     int n = static_cast<int>(mesh.positions.size());
     result.weldedVertexCount = n;
@@ -588,7 +254,7 @@ Result Solve(const std::vector<float>& positions, const std::vector<BoneSegment>
     BoneTable table = BuildBoneTable(segments);
     int slotCount = static_cast<int>(table.boneId.size());
 
-    TriangleBvh bvh;
+    autorig::TriangleBvh bvh;
     if (options.useVisibility) {
         bvh.Build(mesh);
     }
@@ -795,7 +461,7 @@ Result Solve(const std::vector<float>& positions, const std::vector<BoneSegment>
         for (int sweep = 0; sweep < 2; sweep++) {
             std::vector<int> regionOf(n, -1);
             std::vector<std::vector<int>> regions;
-            std::vector<int> stack;
+            std::vector<int> pending;
 
             for (int start = 0; start < n; start++) {
                 if (regionOf[start] >= 0) {
@@ -803,17 +469,17 @@ Result Solve(const std::vector<float>& positions, const std::vector<BoneSegment>
                 }
                 int id = static_cast<int>(regions.size());
                 regions.push_back({});
-                stack.clear();
-                stack.push_back(start);
+                pending.clear();
+                pending.push_back(start);
                 regionOf[start] = id;
-                while (!stack.empty()) {
-                    int v = stack.back();
-                    stack.pop_back();
+                while (!pending.empty()) {
+                    int v = pending.back();
+                    pending.pop_back();
                     regions[id].push_back(v);
                     for (int neighbor : mesh.neighbors[v]) {
                         if (regionOf[neighbor] < 0 && assigned[neighbor] == assigned[v]) {
                             regionOf[neighbor] = id;
-                            stack.push_back(neighbor);
+                            pending.push_back(neighbor);
                         }
                     }
                 }

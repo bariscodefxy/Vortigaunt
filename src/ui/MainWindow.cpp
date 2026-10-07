@@ -77,7 +77,9 @@
 #ifdef METIN2_SCRIPT_EFFECT
 #include "MseViewerWindow.h"
 #endif
+#ifdef ENABLE_AUTORIG
 #include "AutoRigDialog.h"
+#endif
 #include "WadMakerDialog.h"
 #include "SettingsDialog.h"
 #include "dialogs/AboutDialog.h"
@@ -203,8 +205,10 @@ MainWindow::MainWindow(QWidget* parent)
     m_audioConvertAction = goldSrcMenu->addAction(tr("Convert WAV for Goldsrc..."));
     connect(m_audioConvertAction, &QAction::triggered, this, &MainWindow::onOpenAudioConverter);
 
+#ifdef ENABLE_AUTORIG
     m_autoRigAction = goldSrcMenu->addAction(tr("Auto-Rig (Beta)"));
     connect(m_autoRigAction, &QAction::triggered, this, &MainWindow::onOpenAutoRigDialog);
+#endif
     
 
     // Other Submenu
@@ -1221,6 +1225,7 @@ void MainWindow::onOpenMseViewer()
 }
 #endif
 
+#ifdef ENABLE_AUTORIG
 void MainWindow::onOpenAutoRigDialog()
 {
     AutoRigDialog* qtDialog = new AutoRigDialog(this);
@@ -1230,6 +1235,7 @@ void MainWindow::onOpenAutoRigDialog()
     qtDialog->raise();
     qtDialog->activateWindow();
 }
+#endif
 
 void MainWindow::onOpenVpkViewer()
 {

@@ -2,7 +2,9 @@
 
 #include "core/smd/SmdParser.h"
 #include "HeatRig.h"
+#include "WeightTransfer.h"
 #include <assimp/scene.h>
+#include <utility>
 #include <vector>
 #include <cmath>
 #include <unordered_set>
@@ -32,22 +34,54 @@ public:
     std::vector<int> RigVertices(const std::vector<float>& vertexPositions, const std::vector<float>& vertexNormals, bool useDepthPenalty = true);
     
 
-    // Rig vertices with triangle topology smoothing (recommended for SMD)
-    // Uses mesh adjacency to smooth bone assignments at joint boundaries
-    // vertexPositions: flat array (x,y,z per vertex), vertices are in triangle order (every 3 = 1 triangle)
-    // vertexNormals: flat array of vertex normals (nx,ny,nz per vertex) - optional, pass empty to disable
-    // smoothingPasses: number of mesh-topology smoothing iterations (default 3)
-    // useDepthPenalty: see RigVertices
     std::vector<int> RigTriangles(const std::vector<float>& vertexPositions, const std::vector<float>& vertexNormals, int smoothingPasses = 3, bool useDepthPenalty = true);
     
-    // Rig with bone heat diffusion - the algorithm behind Blender's
-    // "Parent With Automatic Weights", collapsed to one bone per vertex.
-    // Unlike RigTriangles this is occlusion aware, so weights do not leak
-    // between limbs that merely happen to be close together, and every copy of
-    // a shared vertex is guaranteed the same bone so the model cannot tear.
-    // vertexPositions: flat array (x,y,z per vertex) in triangle order.
+#ifdef ENABLE_AUTORIG
+ 
     heatrig::Result RigTrianglesHeat(const std::vector<float>& vertexPositions,
                                      const heatrig::Options& options = heatrig::Options());
+
+    // What rigging against a reference model produced.
+    struct ReferenceRigResult
+    {
+        bool ok = false;
+        std::string error;
+
+        // One bone index per input vertex, in this skeleton's numbering.
+        std::vector<int> boneIndices;
+
+        weighttransfer::Result transfer;
+        heatrig::Result heat;
+
+        // Vertices the reference did not cover, answered by the heat solver.
+        int filledByHeat = 0;
+
+        // Vertices moved by snapping a seam onto its joint.
+        int seamSnappedVertices = 0;
+
+        // Reference bones with no bone of that name here; vertices on them
+        // follow the nearest ancestor that does match.
+        std::vector<std::string> unmatchedReferenceBones;
+    };
+
+
+    ReferenceRigResult RigTrianglesWithReference(
+        const std::vector<float>& vertexPositions,
+        const std::vector<SmdBone>& referenceBones,
+        const std::vector<float>& referencePositions,
+        const std::vector<int>& referenceBoneIndices,
+        const weighttransfer::Options& transferOptions = weighttransfer::Options(),
+        const heatrig::Options& heatOptions = heatrig::Options());
+
+
+    int SnapSeamsToJoints(const std::vector<float>& vertexPositions,
+                          std::vector<int>& boneIndices,
+                          float bandFraction = 0.3f) const;
+
+    // The segment a bone deforms along, ignoring marker bones.
+    std::pair<aiVector3D, aiVector3D> BoneSegmentOf(int bone) const;
+
+#endif  // ENABLE_AUTORIG
 
     // Rig an Assimp mesh
     std::vector<int> RigMesh(const aiMesh* mesh);
@@ -74,14 +108,9 @@ public:
         std::string reason;
     };
 
-    // Spot helper and marker bones from the shape of the skeleton alone, with no
-    // name matching, so the same check works for Half-Life, Counter-Strike and
-    // CSO skeletons alike. Two things disqualify a bone:
-    //   - it hangs off nothing and carries nothing, so no animation moves it
-    //     with the limb it sits in (CSO knee and elbow markers are like this)
-    //   - it is a childless bone parked on top of another bone, so it has no
-    //     length to deform along and its direction is arbitrary
+
     std::vector<NonDeformerBone> DetectNonDeformerBones() const;
+
 
     // Set bones to ignore during rigging
     void SetIgnoredBones(const std::unordered_set<int>& ignoredBones);

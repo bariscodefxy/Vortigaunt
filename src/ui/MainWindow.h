@@ -63,7 +63,9 @@ private slots:
     void onOpenMseViewer();
 #endif
 
+#ifdef ENABLE_AUTORIG
     void onOpenAutoRigDialog();
+#endif
     
     void onOpenSettings();
 
@@ -149,7 +151,9 @@ private:
 	QAction*       m_lithtechSpriteAction; // Lithtech Sprite Viewer
 	QAction*       m_lolModelAction; // Khada LoL Model Downloader
     QAction*       m_mseViewAction; // Metin2 Script Effect
+#ifdef ENABLE_AUTORIG
 	QAction*       m_autoRigAction; // Auto-Rig (Beta)
+#endif
     QAction*       m_wadMakerAction;
     QAction*       m_audioConvertAction;
     QAction*       m_steamWorkshopAction;

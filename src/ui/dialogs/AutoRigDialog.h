@@ -32,9 +32,15 @@ protected:
 
 private slots:
     void onBrowseMesh();
+#ifdef ENABLE_AUTORIG
+    void onBrowseReference();
+#endif  // ENABLE_AUTORIG
     void onBrowseOutput();
     void onRig();
     void onMeshPathChanged(const QString& path);
+#ifdef ENABLE_AUTORIG
+    void onReferencePathChanged(const QString& path);
+#endif  // ENABLE_AUTORIG
     void onSearchBones(const QString& text);
     void onSelectAllBones();
     void onDeselectAllBones();
@@ -46,13 +52,23 @@ private:
     QLineEdit* m_meshEdit;
     QPushButton* m_browseMeshButton;
     
+#ifdef ENABLE_AUTORIG
+    QLineEdit* m_referenceEdit;
+    QPushButton* m_browseReferenceButton;
+
+#endif  // ENABLE_AUTORIG
+
     QLineEdit* m_outputEdit;
     QPushButton* m_browseOutputButton;
     
     QDoubleSpinBox* m_scaleSpinBox;
     QCheckBox* m_flipYZCheck;
+#ifdef ENABLE_AUTORIG
+    QCheckBox* m_useReferenceSkeletonCheck;
     QCheckBox* m_heatDiffusionCheck;
     QCheckBox* m_pivotSnapCheck;
+#endif  // ENABLE_AUTORIG
+
     QCheckBox* m_depthPenaltyCheck;
     
     QPushButton* m_rigButton;
@@ -76,5 +92,6 @@ private:
     
     void setProgress(int value);
     void populateBoneTree(const std::vector<SmdBone>& bones);
+    void loadBoneTreeForOutput();
     void updateBoneCountLabel();
 };

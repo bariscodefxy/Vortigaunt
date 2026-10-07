@@ -32,6 +32,7 @@
 
 #include "core/smd/SmdParser.h"
 #include "core/autorig/AutoRig.h"
+#include "core/autorig/WeightTransfer.h"
 #include "core/smd/SmdWriter.h" 
 #include "LanguageManager.h"
 #include "core/VortigauntLog.h"
@@ -65,6 +66,27 @@ AutoRigDialog::AutoRigDialog(QWidget* parent) : QDialog(parent)
     meshLayout->addWidget(m_browseMeshButton);
     mainLayout->addWidget(meshGroup);
 
+    // Reference model group
+    QGroupBox* referenceGroup = new QGroupBox(tr("Reference Model (optional)"));
+    QHBoxLayout* referenceLayout = new QHBoxLayout(referenceGroup);
+    m_referenceEdit = new QLineEdit();
+    m_referenceEdit->setPlaceholderText(tr("An already rigged SMD to copy the rigging from"));
+    m_referenceEdit->setToolTip(tr("Rig by example. Every vertex takes the bone of the closest point on this "
+                                   "model's surface, so the result inherits how the original artist rigged it: "
+                                   "which helper bones they deformed with, where they put the seams.\n\n"
+                                   "Bones are matched by name, so the reference can be any model whose skeleton "
+                                   "names agree - Half-Life, Counter-Strike and CSO all use Biped names.\n\n"
+                                   "Whatever the reference does not cover - a cape, a backpack, hair it never "
+                                   "had - falls back to Bone Heat Diffusion. Leave empty to rig from geometry "
+                                   "alone.\n\n"
+                                   "The mesh has to be sitting on the skeleton already: the closer the two "
+                                   "models overlap, the more of the rigging carries over."));
+    m_browseReferenceButton = new QPushButton(tr("Browse..."));
+    referenceLayout->addWidget(m_referenceEdit);
+    referenceLayout->addWidget(m_browseReferenceButton);
+    mainLayout->addWidget(referenceGroup);
+
+
     // Output group
     QGroupBox* outputGroup = new QGroupBox(tr("Output SMD"));
     QHBoxLayout* outputLayout = new QHBoxLayout(outputGroup);
@@ -92,6 +114,19 @@ AutoRigDialog::AutoRigDialog(QWidget* parent) : QDialog(parent)
     optionsLayout->addLayout(scaleLayout);
 
     
+    m_useReferenceSkeletonCheck = new QCheckBox(tr("Write the reference model's skeleton"));
+    m_useReferenceSkeletonCheck->setToolTip(tr("Give the output the skeleton of the reference model instead of the "
+                                               "one the mesh came in with. This is what porting a model needs: the "
+                                               "animations of the target game are built for the target game's "
+                                               "skeleton, so a model carrying its old skeleton cannot play them - "
+                                               "studiomdl refuses it with \"illegal parent bone replacement\".\n\n"
+                                               "Turn this off only when the mesh is already on the skeleton you want "
+                                               "to keep and the reference is there just to improve the rigging.\n\n"
+                                               "Has no effect without a reference model."));
+    m_useReferenceSkeletonCheck->setChecked(true);
+    optionsLayout->addWidget(m_useReferenceSkeletonCheck);
+
+
     m_flipYZCheck = new QCheckBox(tr("Flip Y/Z axes"));
     m_flipYZCheck->setToolTip(tr("Enable if mesh is oriented differently (e.g., from Blender)"));
     optionsLayout->addWidget(m_flipYZCheck);
@@ -110,6 +145,7 @@ AutoRigDialog::AutoRigDialog(QWidget* parent) : QDialog(parent)
                                     "unavoidable; it is smallest when the cut sits on the pivot."));
     m_pivotSnapCheck->setChecked(true);
     optionsLayout->addWidget(m_pivotSnapCheck);
+
 
     m_depthPenaltyCheck = new QCheckBox(tr("Use Hierarchy Depth Penalty (Enable for Player Models)"));
     m_depthPenaltyCheck->setToolTip(tr("Prevents helper bones from stealing vertices. Uncheck this for Hand/Viewmodel meshes."));
@@ -228,14 +264,19 @@ AutoRigDialog::AutoRigDialog(QWidget* parent) : QDialog(parent)
     topLayout->addWidget(tipGroup, 0);
 
     connect(m_browseMeshButton, &QPushButton::clicked, this, &AutoRigDialog::onBrowseMesh);
+    connect(m_browseReferenceButton, &QPushButton::clicked, this, &AutoRigDialog::onBrowseReference);
     connect(m_browseOutputButton, &QPushButton::clicked, this, &AutoRigDialog::onBrowseOutput);
     connect(m_rigButton, &QPushButton::clicked, this, &AutoRigDialog::onRig);
     
     connect(m_meshEdit, &QLineEdit::textChanged, this, &AutoRigDialog::onMeshPathChanged);
+    connect(m_referenceEdit, &QLineEdit::textChanged, this, &AutoRigDialog::onReferencePathChanged);
+    connect(m_useReferenceSkeletonCheck, &QCheckBox::toggled, this, [this]() { loadBoneTreeForOutput(); });
+
     connect(m_boneSearchEdit, &QLineEdit::textChanged, this, &AutoRigDialog::onSearchBones);
     connect(m_selectAllBonesButton, &QPushButton::clicked, this, &AutoRigDialog::onSelectAllBones);
     connect(m_deselectAllBonesButton, &QPushButton::clicked, this, &AutoRigDialog::onDeselectAllBones);
     connect(m_boneTreeWidget, &QTreeWidget::itemChanged, this, &AutoRigDialog::updateBoneCountLabel);
+
 
     // The depth penalty only steers the legacy nearest-bone search; the heat
     // solver decides the same thing from the mesh itself.
@@ -246,6 +287,7 @@ AutoRigDialog::AutoRigDialog(QWidget* parent) : QDialog(parent)
     };
     connect(m_heatDiffusionCheck, &QCheckBox::toggled, this, syncRigMethod);
     syncRigMethod();
+
     VortigauntLog::addLogWidget(m_logEdit);
 
     VortigauntLog::Vortigaunt_Printf("^2Auto-Rig ready.");
@@ -271,6 +313,16 @@ void AutoRigDialog::onBrowseMesh() {
         m_outputEdit->setText(outPath);
     }
 }
+
+
+void AutoRigDialog::onBrowseReference() {
+    QString path = QFileDialog::getOpenFileName(this, tr("Select Reference Model"), QString(),
+                                                tr("SMD Files (*.smd);;All Files (*)"));
+    if (!path.isEmpty()) {
+        m_referenceEdit->setText(path);
+    }
+}
+
 
 void AutoRigDialog::onBrowseOutput() {
     QString path = QFileDialog::getSaveFileName(
@@ -385,7 +437,90 @@ void AutoRigDialog::onRig() {
     }
     
     std::vector<int> boneIndices;
-    if (m_heatDiffusionCheck->isChecked()) {
+
+    const QString referencePath = m_referenceEdit->text().trimmed();
+
+    if (!referencePath.isEmpty()) {
+        VortigauntLog::Vortigaunt_Printf("^2Reading the reference model...");
+        QApplication::processEvents();
+
+        SmdParser referenceParser;
+        if (!referenceParser.Parse(referencePath.toStdString())) {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^7ERROR: ^9%1")
+                .arg(QString::fromStdString(referenceParser.GetError())));
+            m_rigButton->setEnabled(true);
+            m_progressBar->setVisible(false);
+            return;
+        }
+
+        // Porting a model means handing it the target game's skeleton. Keeping
+        // the one it arrived with is what makes studiomdl reject the compile
+        // with "illegal parent bone replacement": the animations are built for
+        // the target skeleton and the reference mesh disagrees about it.
+        if (m_useReferenceSkeletonCheck->isChecked()) {
+            gsrcAutorig.SetSkeleton(referenceParser.GetBones());
+            gsrcAutorig.SetIgnoredBones(ignoredBones);
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Output will carry the reference skeleton: ^5%1 ^2bones (the mesh came with ^5%2^2).")
+                .arg(referenceParser.GetBones().size())
+                .arg(inputBones.size()));
+        }
+
+        std::vector<float> referencePositions;
+        std::vector<int> referenceBones;
+        for (const auto& tri : referenceParser.GetTriangles()) {
+            for (int v = 0; v < 3; v++) {
+                referencePositions.push_back(tri.vertices[v].x);
+                referencePositions.push_back(tri.vertices[v].y);
+                referencePositions.push_back(tri.vertices[v].z);
+                referenceBones.push_back(tri.vertices[v].boneIndex);
+            }
+        }
+
+        weighttransfer::Options transferOptions;
+        transferOptions.weldEpsilon = std::max(1e-6f, 0.001f * scale);
+
+        heatrig::Options heatOptions;
+        heatOptions.pivotSnap = m_pivotSnapCheck->isChecked() ? 1.0f : 0.0f;
+        heatOptions.weldEpsilon = transferOptions.weldEpsilon;
+
+        AutoRig::ReferenceRigResult referenceResult = gsrcAutorig.RigTrianglesWithReference(
+            vertexPositions, referenceParser.GetBones(), referencePositions, referenceBones,
+            transferOptions, heatOptions);
+
+        if (!referenceResult.ok) {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^7ERROR: ^9%1")
+                .arg(QString::fromStdString(referenceResult.error)));
+            m_rigButton->setEnabled(true);
+            m_progressBar->setVisible(false);
+            return;
+        }
+
+        boneIndices = std::move(referenceResult.boneIndices);
+        const weighttransfer::Result& t = referenceResult.transfer;
+
+        VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Copied the rigging of ^5%1 ^2vertices from the reference.")
+            .arg(t.transferredVertices));
+        VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Distance to the reference surface: median ^5%1^2, 95%% of them under ^5%2^2.")
+            .arg(t.medianDistance, 0, 'f', 2)
+            .arg(t.p95Distance, 0, 'f', 2));
+
+        if (referenceResult.seamSnappedVertices > 0) {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Placed ^5%1 ^2vertices by the joint they sit on, instead of by the reference surface.")
+                .arg(referenceResult.seamSnappedVertices));
+        }
+        if (referenceResult.filledByHeat > 0) {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^3%1 ^2vertices were not covered by the reference and were rigged by heat diffusion instead.")
+                .arg(referenceResult.filledByHeat));
+        }
+        if (!referenceResult.unmatchedReferenceBones.empty()) {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^3%1 ^2reference bone(s) have no bone of that name here; their vertices followed the nearest matching parent.")
+                .arg(referenceResult.unmatchedReferenceBones.size()));
+        }
+        if (t.weldedVertexCount > 0 && t.uncoveredVertices * 4 > t.weldedVertexCount) {
+            VortigauntLog::Vortigaunt_Printf("^7WARNING: ^9The reference covered less than three quarters of the mesh.");
+            VortigauntLog::Vortigaunt_Printf("^9Fit the mesh onto the skeleton more closely, or pick a reference that is shaped more like it.");
+        }
+    } else if (m_heatDiffusionCheck->isChecked()) {
         heatrig::Options heatOptions;
         heatOptions.pivotSnap = m_pivotSnapCheck->isChecked() ? 1.0f : 0.0f;
         // Vertices were scaled above, so the welding tolerance has to follow.
@@ -432,7 +567,7 @@ void AutoRigDialog::onRig() {
                 .arg(thin.join(QStringLiteral(", "))));
         }
     } else {
-        // Legacy path: nearest bone plus topology smoothing over 10 passes.
+        // Nearest bone plus topology smoothing over 10 passes.
         boneIndices = gsrcAutorig.RigTriangles(vertexPositions, vertexNormals, 10, useDepthPenalty);
     }
     VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Rigged ^5%1 ^2vertices.").arg(boneIndices.size()));
@@ -444,6 +579,7 @@ void AutoRigDialog::onRig() {
     SmdWriter writer;
     writer.SetSkeleton(gsrcAutorig.GetBones());
     
+
     // Apply scale/flip to triangles for output
     for (auto& tri : triangles) {
         for (int v = 0; v < 3; v++) {
@@ -525,9 +661,28 @@ bool AutoRigDialog::eventFilter(QObject* obj, QEvent* event) {
     return QDialog::eventFilter(obj, event);
 }
 
-void AutoRigDialog::onMeshPathChanged(const QString& path) {
-    QString trimmedPath = path.trimmed();
-    if (trimmedPath.isEmpty()) {
+void AutoRigDialog::onMeshPathChanged(const QString& /*path*/) {
+    loadBoneTreeForOutput();
+}
+
+
+void AutoRigDialog::onReferencePathChanged(const QString& /*path*/) {
+    loadBoneTreeForOutput();
+}
+
+
+// The bone list always shows the skeleton the OUTPUT will carry, because that
+// is the one the exclusions have to be indexed against: with a reference model
+// whose skeleton is being written, the mesh's own bones never reach the file.
+void AutoRigDialog::loadBoneTreeForOutput() {
+
+    const QString referencePath = m_referenceEdit->text().trimmed();
+    const bool fromReference = !referencePath.isEmpty() && m_useReferenceSkeletonCheck->isChecked();
+    const QString path = fromReference ? referencePath : m_meshEdit->text().trimmed();
+
+
+    SmdParser parser;
+    if (path.isEmpty() || !parser.Parse(path.toStdString()) || parser.GetBones().empty()) {
         m_loadedBones.clear();
         m_boneTreeWidget->clear();
         m_boneItemMap.clear();
@@ -535,15 +690,12 @@ void AutoRigDialog::onMeshPathChanged(const QString& path) {
         return;
     }
 
-    SmdParser parser;
-    if (parser.Parse(trimmedPath.toStdString())) {
-        m_loadedBones = parser.GetBones();
-        populateBoneTree(m_loadedBones);
-    } else {
-        m_loadedBones.clear();
-        m_boneTreeWidget->clear();
-        m_boneItemMap.clear();
-        updateBoneCountLabel();
+    m_loadedBones = parser.GetBones();
+    populateBoneTree(m_loadedBones);
+
+    if (fromReference) {
+        VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2Bone list is showing the reference skeleton (^5%1 ^2bones) - that is what the output will carry.")
+            .arg(m_loadedBones.size()));
     }
 }
 
@@ -555,6 +707,7 @@ void AutoRigDialog::populateBoneTree(const std::vector<SmdBone>& bones) {
         updateBoneCountLabel();
         return;
     }
+
 
     // Helper and marker bones cannot deform anything, so start them excluded.
     // Detection is purely geometric, which is why it works the same on a
@@ -578,6 +731,7 @@ void AutoRigDialog::populateBoneTree(const std::vector<SmdBone>& bones) {
         VortigauntLog::Vortigaunt_Printf("^3Re-check them in the bone list if you want them to take vertices.");
     }
 
+
     std::vector<int> roots;
     std::vector<std::vector<int>> children(bones.size());
     for (size_t i = 0; i < bones.size(); i++) {
@@ -596,6 +750,7 @@ void AutoRigDialog::populateBoneTree(const std::vector<SmdBone>& bones) {
         item->setData(0, Qt::UserRole, boneIdx);
         item->setFlags(item->flags() | Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
 
+
         auto helper = helperReasons.find(boneIdx);
         if (helper != helperReasons.end()) {
             // Unchecked, not hidden: the user can always put it back.
@@ -605,6 +760,7 @@ void AutoRigDialog::populateBoneTree(const std::vector<SmdBone>& bones) {
         } else {
             item->setCheckState(0, Qt::Checked);
         }
+
 
         if (parentItem) {
             parentItem->addChild(item);

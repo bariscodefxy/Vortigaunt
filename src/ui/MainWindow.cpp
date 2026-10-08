@@ -60,6 +60,7 @@
 #include "core/VortigauntVersion.h"
 #include "core/extractors/pak/PakExtractor.h"
 #include "core/converters/Gr2Converter.h"
+#include "core/converters/FbxGlbConverter.h"
 #include "core/VortigauntLog.h"
 
 #ifdef ENABLE_GRANNY2
@@ -370,6 +371,7 @@ MainWindow::MainWindow(QWidget* parent)
     m_operationCombo = new QComboBox();
     m_operationCombo->addItem(tr("Convert LTB"));
     m_operationCombo->addItem(tr("Convert GR2"));
+    m_operationCombo->addItem(tr("Convert FBX/GLB"));
 #ifdef METIN2_SCRIPT_EFFECT
     m_operationCombo->addItem(tr("Convert MSE Effect (Metin2 Effect Script)"));
 #endif
@@ -564,6 +566,7 @@ MainWindow::MainWindow(QWidget* parent)
         QString currentText = m_operationCombo->itemText(index);
         bool isGr2 = currentText.contains("GR2", Qt::CaseInsensitive);
         bool isLtb = currentText.contains("LTB", Qt::CaseInsensitive);
+        bool isFbxGlb = currentText.contains("FBX", Qt::CaseInsensitive);
         bool isArchiveFile = currentText.contains("REZ", Qt::CaseInsensitive) ||
 			currentText.contains("PAK", Qt::CaseInsensitive) ||
 			currentText.contains("VPK", Qt::CaseInsensitive);
@@ -576,7 +579,7 @@ MainWindow::MainWindow(QWidget* parent)
         m_gr2AnimGroup->setVisible(isGr2);
         m_mirrorUVYCheck->setVisible(isGr2); // Show Mirror UV Y checkbox only for GR2
         m_invertAlphaCheck->setVisible(isGr2); // Show Invert Alpha checkbox only for GR2
-        m_writeQCCheck->setVisible(isGr2 || isLtb); // Show Write QC checkbox  for GR2 & Ltb
+        m_writeQCCheck->setVisible(isGr2 || isLtb || isFbxGlb); // Show Write QC checkbox  for GR2, Ltb & FBX/GLB
 
 
         m_ignoreMeshesCheck->setVisible(isLtb);
@@ -619,7 +622,7 @@ MainWindow::MainWindow(QWidget* parent)
     
     m_mirrorUVYCheck->setVisible(initialGr2);
     m_invertAlphaCheck->setVisible(initialGr2);
-    m_writeQCCheck->setVisible(initialGr2 || initialLtb);
+    m_writeQCCheck->setVisible(initialGr2 || initialLtb || initialText.contains("FBX", Qt::CaseInsensitive));
     m_unityBmpCheck->setVisible(initialText.contains("Unity", Qt::CaseInsensitive));
     
     if (m_outputFormatLabel) m_outputFormatLabel->setVisible(isModelOp);
@@ -819,6 +822,7 @@ void MainWindow::updateOperationComboForFile(const QString& filePath)
 #ifdef ENABLE_GRANNY2
     m_operationCombo->addItem(tr("Convert GR2 "));
 #endif
+    m_operationCombo->addItem(tr("Convert FBX/GLB"));
     m_operationCombo->addItem(tr("Extract REZ File"));
     m_operationCombo->addItem(tr("Extract PAK File (Counter Strike Online)"));
     m_operationCombo->addItem(tr("Extract XFS File (Xenesis)"));
@@ -839,12 +843,17 @@ void MainWindow::updateOperationComboForFile(const QString& filePath)
 
     for (int i = 0; i < m_operationCombo->count(); ++i)
     {
+		// we should optimize this because in the future we will add more formats. But for now, this is okay.
         QString itemText = m_operationCombo->itemText(i).toLower();
         if (ext == "ltb" && itemText.contains("ltb")) {
             selectIndex = i;
             break;
         }
         else if (ext == "gr2" && itemText.contains("gr2")) {
+            selectIndex = i;
+            break;
+        }
+        else if ((ext == "fbx" || ext == "glb" || ext == "gltf") && itemText.contains("fbx")) {
             selectIndex = i;
             break;
         }
@@ -890,7 +899,7 @@ void MainWindow::onBrowseInput()
     }
     else
     {
-        QString baseExtensions = "*.ltb *.gr2 *.rez *.pak *.mse *.xfs *.unity3d *.bundle *.assets *.vpk *.gma";
+        QString baseExtensions = "*.ltb *.gr2 *.fbx *.glb *.gltf *.rez *.pak *.mse *.xfs *.unity3d *.bundle *.assets *.vpk *.gma";
         filterStr = tr("Supported files (%1);;All files (*.*)").arg(baseExtensions);
     }
 
@@ -1032,8 +1041,10 @@ void MainWindow::onRun()
     // Capture Unity texture output format on the UI thread
     bool unityTexturesToBmp = !m_unityBmpCheck || m_unityBmpCheck->isChecked();
 
+    const bool fbxGlbWriteQC = !m_writeQCCheck || m_writeQCCheck->isChecked();
+
     // Start background task
-    runInBackground([this, modeText, selectedFiles, inputPath, outputDir, ltbEncSettings, unityTexturesToBmp]() mutable {
+    runInBackground([this, modeText, selectedFiles, inputPath, outputDir, ltbEncSettings, unityTexturesToBmp, fbxGlbWriteQC]() mutable {
         
 
 
@@ -1055,7 +1066,7 @@ void MainWindow::onRun()
         // so i did this
         if ((modeText.contains("Multi Process Mode", Qt::CaseInsensitive) || selectedFiles.size() > 1) && !modeText.contains("Unity", Qt::CaseInsensitive))
         {
-            QStringList ltbList, gr2List, rezList, pakList, xfsList, vpkList;
+            QStringList ltbList, gr2List, rezList, pakList, xfsList, vpkList, fbxGlbList;
             
             for (const QString& f : selectedFiles) {
                 QString ext = QFileInfo(f).suffix().toLower();
@@ -1063,6 +1074,7 @@ void MainWindow::onRun()
                 else if (ext == "pak") pakList << f;
                 else if (ext == "gr2") gr2List << f;
                 else if (ext == "ltb") ltbList << f;
+                else if (ext == "fbx" || ext == "glb" || ext == "gltf") fbxGlbList << f;
                 else if (ext == "xfs") xfsList << f;
                 else if (ext == "vpk" || ext == "gma") vpkList << f; // VPK and GMA share the same pipeline
             }
@@ -1077,6 +1089,9 @@ void MainWindow::onRun()
                     convertGr2(gr2, outputDir);
                 }
             }
+            for (const QString& model : fbxGlbList) {
+                convertFbxGlb(model, outputDir, fbxGlbWriteQC);
+            }
             if (!rezList.isEmpty()) extractArchiveRez(rezList, outputDir);
             if (!pakList.isEmpty()) extractArchivePak(pakList, outputDir);
             if (!xfsList.isEmpty()) extractArchiveXfs(xfsList, outputDir);
@@ -1089,6 +1104,10 @@ void MainWindow::onRun()
         else if (modeText.contains("GR2", Qt::CaseInsensitive))
         {
             convertGr2(inputPath, outputDir);
+        }
+        else if (modeText.contains("FBX", Qt::CaseInsensitive))
+        {
+            convertFbxGlb(inputPath, outputDir, fbxGlbWriteQC);
         }
         else if (modeText.contains("Extract REZ", Qt::CaseInsensitive))
         {
@@ -1275,6 +1294,58 @@ void MainWindow::onOpenAudioConverter()
     qtDialog->show();
     qtDialog->raise();
     qtDialog->activateWindow();
+}
+
+void MainWindow::convertFbxGlb(const QString& inputPath, const QString& outputDir, bool writeQC)
+{
+    // A single model, or every FBX / GLB / glTF under a folder.
+    std::vector<std::filesystem::path> files;
+    const std::filesystem::path start(inputPath.toStdWString());
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(start, ec))
+    {
+        files.push_back(start);
+    }
+    else if (std::filesystem::is_directory(start, ec))
+    {
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(start, ec))
+        {
+            if (!entry.is_regular_file(ec))
+                continue;
+            if (FbxGlbConverter::IsSupportedFile(QString::fromStdWString(entry.path().wstring()).toStdString()))
+                files.push_back(entry.path());
+        }
+    }
+
+    if (files.empty())
+    {
+        VortigauntLog::Vortigaunt_Printf(QStringLiteral("No .fbx / .glb / .gltf files found in '%1'.").arg(inputPath));
+        return;
+    }
+
+    FbxGlbConvertOptions options;
+    options.writeQC = writeQC;
+
+    FbxGlbConverter converter;
+    int converted = 0;
+    for (const auto& p : files)
+    {
+        const QString inFile = QString::fromStdWString(p.wstring());
+        if (!FbxGlbConverter::IsSupportedFile(inFile.toStdString()))
+        {
+            VortigauntLog::Vortigaunt_Printf(QStringLiteral("^3Skipped:^7 %1 is not an FBX, GLB or glTF file.").arg(inFile));
+            continue;
+        }
+
+        const FbxGlbConvertReport report = converter.Convert(inFile.toStdString(), outputDir.toStdString(), options);
+        if (report.ok)
+            converted++;
+    }
+
+    if (files.size() > 1)
+    {
+        VortigauntLog::Vortigaunt_Printf(QStringLiteral("^2%1 of %2 models converted.").arg(converted).arg(files.size()));
+    }
 }
 
 void MainWindow::convertLtb(const QString& inputPath, const QString& outputDir, const ltbConverterSetting& settings)

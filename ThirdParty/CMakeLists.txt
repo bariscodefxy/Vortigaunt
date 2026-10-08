@@ -14,6 +14,10 @@ add_library(assimp_includes INTERFACE)
 target_include_directories(assimp_includes INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/assimp/include)
 target_link_libraries(assimp_includes INTERFACE assimp)
 
+# rapidjson, header only, for the glTF
+add_library(rapidjson_headers INTERFACE)
+target_include_directories(rapidjson_headers INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/assimp/contrib/rapidjson/include)
+
 # zlib headers (from assimp's internal build) as an INTERFACE target
 add_library(zlib_headers INTERFACE)
 target_include_directories(zlib_headers INTERFACE

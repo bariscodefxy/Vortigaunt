@@ -105,6 +105,8 @@ private:
 
     void convertGr2(const QString& inputPath, const QString& outputDir);
 
+    void convertFbxGlb(const QString& inputPath, const QString& outputDir, bool writeQC);
+
     // UI
     void updateOperationComboForFile(const QString& filePath);
 

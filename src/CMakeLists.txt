@@ -10,6 +10,7 @@ option(VORTIGAUNT_AUTORIG "Enable the GoldSrc Auto-Rig tool" OFF)
 
 set(VORTIGAUNT_CORE_HEADERS
     core/converters/Gr2Converter.h
+    core/converters/FbxGlbConverter.h
     core/WadMaker.h
     
     core/QCFile.h
@@ -83,6 +84,7 @@ set(VORTIGAUNT_CORE
     core/WadMaker.cpp
     
     core/QCFile.cpp
+    core/converters/FbxGlbConverter.cpp
     core/converters/AudioConvert.cpp
     core/SpriteLoader.cpp
     core/extractors/xfs/XfsExtractor.cpp
@@ -179,7 +181,7 @@ target_include_directories(VortigauntTool PRIVATE
     ./utils
 )
 target_link_libraries(VortigauntTool PRIVATE
-    assimp_includes zlib_headers lzma lz4
+    assimp_includes rapidjson_headers zlib_headers lzma lz4
     gcl_headers audio_headers libimagequant
     unordered_dense::unordered_dense
 )
@@ -241,7 +243,7 @@ if(BUILD_GUI)
         ./utils
     )
     target_link_libraries(VortigauntTool_gui PRIVATE
-        assimp_includes zlib_headers lzma lz4 discord_partner_sdk
+        assimp_includes rapidjson_headers zlib_headers lzma lz4 discord_partner_sdk
         gcl_headers audio_headers libimagequant vtflib
         Qt6::Widgets Qt6::Network Qt6::OpenGL Qt6::OpenGLWidgets Qt6::Multimedia
         unordered_dense::unordered_dense
